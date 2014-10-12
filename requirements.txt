@@ -1,7 +1,7 @@
 # Top level requirements
 git+https://github.com/sbwdlihao/cryptokit.git
 gevent==1.0.1
-celery=3.1.16
+celery==3.1.16
 PyYAML==3.10
 Flask==0.10.1
 setproctitle==1.1.8
