@@ -4,6 +4,7 @@ import time
 import datetime
 
 from binascii import hexlify
+from cryptokit import get_hash_func
 from cryptokit.rpc import CoinRPCException
 from collections import deque
 from cryptokit.util import pack
@@ -46,6 +47,8 @@ class MonitorAuxNetwork(Jobmanager, NodeMonitorMixin):
                                 last_solve_worker=None)
         self.current_net = dict(difficulty=None, height=None, last_block=0.0)
         self.recent_blocks = deque(maxlen=15)
+        self._hash_func = get_hash_func(self.config['currency'])
+        self._hash_func_block = get_hash_func(self.config['currency'], True)
 
     def start(self):
         super(MonitorAuxNetwork, self).start()
@@ -70,11 +73,12 @@ class MonitorAuxNetwork(Jobmanager, NodeMonitorMixin):
             bitcoin_data.aux_pow_type.pack(dict(
                 merkle_tx=dict(
                     tx=bitcoin_data.tx_type.unpack(coinbase_raw),
-                    block_hash=bitcoin_data.hash256(header),
+                    block_hash=bitcoin_data.hash256(header, self._hash_func_block),
                     merkle_link=job.merkle_link,
                 ),
                 merkle_link=bitcoin_data.calculate_merkle_link(aux_data['hashes'],
-                                                               aux_data['index']),
+                                                               aux_data['index'],
+                                                               self._hash_func),
                 parent_block_header=bitcoin_data.block_header_type.unpack(header),
             )).encode('hex'),
         )
