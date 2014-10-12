@@ -97,7 +97,7 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
             gevent.signal(self.config['signal'], self.getblocktemplate, signal=True)
 
         # Find desired auxmonitors
-        self.config['merged'] = set(self.config['merged'])
+        self.config['merged'] = self.config['merged'] and set(self.config['merged']) or set()
         found_merged = set()
 
         for mon in self.manager.component_types['Jobmanager']:
