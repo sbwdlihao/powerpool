@@ -324,7 +324,7 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
 
         # here we recalculate the current merkle branch and partial
         # coinbases for passing to the mining clients
-        coinbase = Transaction()
+        coinbase = Transaction(coin=self.config['currency'])
         coinbase.version = 2
         # create a coinbase input with encoded height and padding for the
         # extranonces so script length is accurate
