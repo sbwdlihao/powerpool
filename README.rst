@@ -51,6 +51,7 @@ installed will work fine.
 .. code-block:: bash
 
     sudo apt-get install rabbitmq-server
+    sudo apt-get install redis-server
 
 Setup a virtualenv and install...
 
