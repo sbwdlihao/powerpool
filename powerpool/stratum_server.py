@@ -450,6 +450,10 @@ class StratumClient(GenericClient):
                         *params,
                         int_nonce=struct.unpack(str("<L"), unhexlify(params[4]))))
 
+        if self.config['algo'] == 'hvc':
+            params[3] = hexlify(struct.pack('<I', int(params[3], 16)))
+            params[4] = hexlify(struct.pack('<I', int(params[4], 16)))
+
         if self.idle:
             self.idle = False
             self.server.idle_clients -= 1
