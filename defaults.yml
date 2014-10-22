@@ -1,7 +1,9 @@
 # ==========================================================================
 # DEFAULTS
 # Represents default configurations applied to all different component types
-# Can be overridden as show above
+# Can be overridden as show in the config.example.yml
+#
+# NOTE: The settings in this file are not used or parsed, simply informative
 # ==========================================================================
 - &stat_reporter_defaults
   type: powerpool.reporters.StatReporter
@@ -58,7 +60,7 @@
   # should we poll the RPC server for new blocks? True will force polling,
   # null will poll if push notifications are disabled, and False will force
   # off
-  poll: False
+  poll:
 
   # the definition of a target of difficulty 1. 4 zeroes for scrypt, 8 for 
   # sha...
@@ -76,6 +78,8 @@
   job_generate_int: 75
   # Time between pinging rpc_servers that are down
   rpc_ping_int: 2
+  # Pay out Darkcoin masternodes if True. Blocks may be rejected if False
+  payout_drk_mn: True
 
 # The HTTP health monitor. Most configs go straight to Flask configuration
 - &server_monitor_defaults
@@ -123,6 +127,10 @@
           - 192
           - 256
           - 512
+          
+  # The minimum allowable user-settable difficulty. Vardiff may still
+  # adjust lower/higher
+  minimum_manual_diff: 64
 
   # time between sending latest job to workers when there is no new block
   push_job_interval: 30

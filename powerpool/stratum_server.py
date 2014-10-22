@@ -33,7 +33,7 @@ class ThrowingArgumentParser(argparse.ArgumentParser):
 
 
 password_arg_parser = ThrowingArgumentParser()
-password_arg_parser.add_argument('-d', '--diff', type=int)
+password_arg_parser.add_argument('-d', '--diff', type=float)
 
 
 class StratumServer(Component, StreamServer):
@@ -60,6 +60,7 @@ class StratumServer(Component, StreamServer):
                                  spm_target=20,
                                  interval=30,
                                  tiers=[8, 16, 32, 64, 96, 128, 192, 256, 512]),
+                    minimum_manual_diff=64,
                     push_job_interval=30,
                     idle_worker_disconnect_threshold=3600,
                     agent=dict(enabled=False,
@@ -74,14 +75,11 @@ class StratumServer(Component, StreamServer):
     def __init__(self, config):
         self._configure(config)
         self.agent_servers = []
-        listener = (self.config['address'], self.config['port'])
 
         # Start a corresponding agent server
         if self.config['agent']['enabled']:
             serv = AgentServer(self)
             self.agent_servers.append(serv)
-
-        StreamServer.__init__(self, listener, spawn=Pool())
 
         # A dictionary of all connected clients indexed by id
         self.clients = {}
@@ -101,8 +99,13 @@ class StratumServer(Component, StreamServer):
         # Track the last job we pushed and when we pushed it
         self.last_flush_job = None
         self.last_flush_time = None
+        self.listener = None
 
     def start(self, *args, **kwargs):
+        self.listener = (self.config['address'],
+                         self.config['port'] + self.manager.config['server_number'])
+        StreamServer.__init__(self, self.listener, spawn=Pool())
+
         self.algo = self.manager.algos[self.config['algo']]
         if not self.config['reporter'] and len(self.manager.component_types['Reporter']) == 1:
             self.reporter = self.manager.component_types['Reporter'][0]
@@ -123,22 +126,22 @@ class StratumServer(Component, StreamServer):
             self.jobmanager = self._lookup(self.config['jobmanager'])
         self.jobmanager.new_job.rawlink(self.new_job)
 
-        self.logger.info("Stratum server starting up on {address}:{port}"
-                         .format(**self.config))
+        self.logger.info("Stratum server starting up on {}".format(self.listener))
         for serv in self.agent_servers:
             serv.start()
         StreamServer.start(self, *args, **kwargs)
         Component.start(self)
 
     def stop(self, *args, **kwargs):
-        self.logger.info("Stratum server {address}:{port} stopping"
-                         .format(**self.config))
+        self.logger.info("Stratum server {} stopping".format(self.listener))
         StreamServer.close(self)
-        for client in self.clients.values():
-            client.stop()
         for serv in self.agent_servers:
             serv.stop()
+        for client in self.clients.values():
+            client.stop()
+        StreamServer.stop(self)
         Component.stop(self)
+        self.logger.info("Exit")
 
     def handle(self, sock, address):
         """ A new connection appears on the server, so setup a new StratumClient
@@ -172,27 +175,12 @@ class StratumServer(Component, StreamServer):
         self.last_flush_time = time.time()
 
     @property
-    def share_percs(self):
-        """ Pretty display of what percentage each reject rate is. Counts
-        from beginning of server connection """
-        acc_tot = self.counters['acc_share_n1'].total or 1
-        low_tot = self.counters['reject_low_share_n1'].total
-        dup_tot = self.counters['reject_dup_share_n1'].total
-        stale_tot = self.counters['reject_stale_share_n1'].total
-        return dict(
-            low_perc=low_tot / float(acc_tot + low_tot) * 100.0,
-            stale_perc=stale_tot / float(acc_tot + stale_tot) * 100.0,
-            dup_perc=dup_tot / float(acc_tot + dup_tot) * 100.0,
-        )
-
-    @property
     def status(self):
         """ For display in the http monitor """
         hps = (self.algo['hashes_per_share'] *
                self.counters['acc_share_n1'].minute /
                60.0)
-        dct = dict(share_percs=self.share_percs,
-                   mhps=hps / 1000000.0,
+        dct = dict(mhps=hps / 1000000.0,
                    hps=hps,
                    last_flush_job=None,
                    agent_client_count=len(self.agent_clients),
@@ -325,6 +313,7 @@ class StratumClient(GenericClient):
         self.idle = False
         self.address = None
         self.worker = None
+        self.client_type = None
         # the worker id. this is also extranonce 1
         id = self.server.stratum_id_count
         if self.manager.config['extranonce_serv_size'] == 8:
@@ -409,8 +398,9 @@ class StratumClient(GenericClient):
         # we push the next difficulty here instead of in the vardiff block to
         # prevent a potential mismatch between client and server
         if self.next_diff != self.difficulty:
-            self.logger.info("Pushing diff updae {} -> {} before job for {}.{}"
-                             .format(self.difficulty, self.next_diff, self.address, self.worker))
+            self.logger.info(
+                "Pushing diff update {} -> {} before job for {}.{}"
+                .format(self.difficulty, self.next_diff, self.address, self.worker))
             self.difficulty = self.next_diff
             self.push_difficulty()
 
@@ -616,6 +606,10 @@ class StratumClient(GenericClient):
                 self.send_error(id_val=data['id'])
                 return
 
+            try:
+                self.client_type = data['params'][0]
+            except IndexError:
+                pass
             ret = {
                 'result': (
                     (
@@ -656,8 +650,9 @@ class StratumClient(GenericClient):
                     pass
                 else:
                     if args.diff:
-                        self.difficulty = args.diff
-                        self.next_diff = args.diff
+                        diff = max(self.config['minimum_manual_diff'], args.diff)
+                        self.difficulty = diff
+                        self.next_diff = diff
             except IndexError:
                 password = ""
                 username = ""
@@ -733,6 +728,7 @@ class StratumClient(GenericClient):
         """ Displayed on the single client view in the http status monitor """
         return dict(alltime_accepted_shares=self.accepted_shares,
                     difficulty=self.difficulty,
+                    type=self.client_type,
                     worker=self.worker,
                     id=self._id,
                     last_share_submit=str(self.last_share_submit_delta),

@@ -34,7 +34,8 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                              currency=REQUIRED,
                              algo=REQUIRED,
                              pool_address='',
-                             signal=None)
+                             signal=None,
+                             payout_drk_mn=True)
 
     def __init__(self, config):
         NodeMonitorMixin.__init__(self)
@@ -80,11 +81,23 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
     @property
     def status(self):
         """ For display in the http monitor """
-        return dict(net_state=self.current_net,
-                    block_stats=self.block_stats,
-                    last_signal=self.last_signal,
-                    currency=self.config['currency'],
-                    job_count=len(self.jobs))
+        ret = dict(net_state=self.current_net,
+                   block_stats=self.block_stats,
+                   last_signal=self.last_signal,
+                   currency=self.config['currency'],
+                   live_coinservers=len(self._live_connections),
+                   down_coinservers=len(self._down_connections),
+                   coinservers={},
+                   job_count=len(self.jobs))
+        for connection in self._live_connections:
+            st = connection.status()
+            st['status'] = 'live'
+            ret['coinservers'][connection.name] = st
+        for connection in self._down_connections:
+            st = connection.status()
+            st['status'] = 'down'
+            ret['coinservers'][connection.name] = st
+        return ret
 
     def start(self):
         Jobmanager.start(self)
@@ -345,9 +358,10 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                            addtl_push=[mm_data] if mm_data else [],
                            extra_script_sig=b'\0' * extranonce_length))
 
-        # Darkcoin payee amount
-        if self._last_gbt.get('payee', '') != '':
-            payout = self._last_gbt['coinbasevalue'] / 5
+        # Payout Darkcoin masternodes
+        if self._last_gbt.get('payee', '') != '' and self.config['payout_drk_mn'] is True:
+            # Grab the darkcoin payout amount, default to 20%
+            payout = self._last_gbt.get('payee_amount', self._last_gbt['coinbasevalue'] / 5)
             self._last_gbt['coinbasevalue'] -= payout
             coinbase.outputs.append(
                 Output.to_address(payout, self._last_gbt['payee']))
