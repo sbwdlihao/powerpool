@@ -74,6 +74,8 @@ class PowerPool(Component, DatagramServer):
                         blake256={"module": "blake_hash.getPoWHash",
                                   "hashes_per_share": 65536},
                         sha256={"module": "cryptokit.sha256d",
+                                "hashes_per_share": 65536},
+                        hvc={"module": "cryptokit.hvc_powhash",
                                 "hashes_per_share": 65536}
                     ))
 

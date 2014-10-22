@@ -6,7 +6,7 @@ import datetime
 
 from binascii import unhexlify, hexlify
 from collections import deque
-from cryptokit import bits_to_difficulty
+from cryptokit import bits_to_difficulty, get_hash_func
 from cryptokit.rpc import CoinRPCException
 from cryptokit.transaction import Transaction, Input, Output
 from cryptokit.block import BlockTemplate
@@ -74,6 +74,8 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                                 last_solve_worker=None)
         self.recent_blocks = deque(maxlen=15)
 
+        self._hash_func = get_hash_func(self.config['currency'])
+
         # Run the looping height poller if we aren't getting push notifications
         if (not self.config['signal'] and self.config['poll'] is None) or self.config['poll']:
             self.gl_methods.append('_poll_height')
@@ -108,7 +110,7 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
             gevent.signal(self.config['signal'], self.getblocktemplate, signal=True)
 
         # Find desired auxmonitors
-        self.config['merged'] = set(self.config['merged'])
+        self.config['merged'] = self.config['merged'] and set(self.config['merged']) or set()
         found_merged = set()
 
         for mon in self.manager.component_types['Jobmanager']:
@@ -325,7 +327,7 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                          for i in xrange(size)]
             mm_data = '\xfa\xbemm'
             mm_data += bitcoin_data.aux_pow_coinbase_type.pack(dict(
-                merkle_root=bitcoin_data.merkle_hash(mm_hashes),
+                merkle_root=bitcoin_data.merkle_hash(mm_hashes, self._hash_func),
                 size=size,
                 nonce=0,
             ))
@@ -347,7 +349,7 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
 
         # here we recalculate the current merkle branch and partial
         # coinbases for passing to the mining clients
-        coinbase = Transaction()
+        coinbase = Transaction(coin=self.config['currency'])
         coinbase.version = 2
         # create a coinbase input with encoded height and padding for the
         # extranonces so script length is accurate
@@ -376,12 +378,14 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
         bt_obj = BlockTemplate.from_gbt(self._last_gbt,
                                         coinbase,
                                         extranonce_length,
-                                        [Transaction(unhexlify(t['data']), fees=t['fee'])
-                                         for t in self._last_gbt['transactions']])
+                                        [Transaction(unhexlify(t['data']), fees=t['fee'], coin=self.config['currency'])
+                                         for t in self._last_gbt['transactions']],
+                                        self.config['currency']
+                                        )
         # add in our merged mining data
         if mm_data:
-            hashes = [bitcoin_data.hash256(tx.raw) for tx in bt_obj.transactions]
-            bt_obj.merkle_link = bitcoin_data.calculate_merkle_link([None] + hashes, 0)
+            hashes = [bitcoin_data.hash256(tx.raw, self._hash_func) for tx in bt_obj.transactions]
+            bt_obj.merkle_link = bitcoin_data.calculate_merkle_link([None] + hashes, 0, self._hash_func)
         bt_obj.merged_data = auxdata
         bt_obj.job_id = job_id
         bt_obj.diff1 = self.config['diff1']

@@ -51,6 +51,7 @@ installed will work fine.
 .. code-block:: bash
 
     sudo apt-get install rabbitmq-server
+    sudo apt-get install redis-server
 
 Setup a virtualenv and install...
 
@@ -66,6 +67,7 @@ Setup a virtualenv and install...
     pip install drk_hash  # for x11 support
     pip install ltc_scrypt  # for scrypt support
     pip install git+https://github.com/BlueDragon747/Blakecoin_Python_POW_Module.git@e3fb2a5d4ea5486f52f9568ffda132bb69ed8772#egg=blake_hash
+    pip install git+https://github.com/heavycoin/heavycoin-hash-python.git@master#egg=hvc_hash
 
 Now copy ``config.yml.example`` to ``config.yml``. All the defaults are
 commented out and mandatory fields are uncommented. Fill out all required fields

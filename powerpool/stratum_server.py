@@ -426,16 +426,36 @@ class StratumClient(GenericClient):
         """ Handles recieving work submission and checking that it is valid
         , if it meets network diff, etc. Sends reply to stratum client. """
         params = data['params']
+
+        # HVC
+        if len(params) >= 6:
+            nvote = params[5]
+        else:
+            nvote = None
+
         # [worker_name, job_id, extranonce2, ntime, nonce]
         # ["slush.miner1", "bf", "00000001", "504e86ed", "b2957c02"]
         if __debug__:
-            self.logger.debug(
-                "Recieved work submit:\n\tworker_name: {0}\n\t"
-                "job_id: {1}\n\textranonce2: {2}\n\t"
-                "ntime: {3}\n\tnonce: {4} ({int_nonce})"
-                .format(
-                    *params,
-                    int_nonce=struct.unpack(str("<L"), unhexlify(params[4]))))
+            if nvote:
+                self.logger.debug(
+                    "Recieved work submit:\n\tworker_name: {0}\n\t"
+                    "job_id: {1}\n\textranonce2: {2}\n\t"
+                    "ntime: {3}\n\tnonce: {4} ({int_nonce})\n\tvote: {5}"
+                    .format(
+                        *params,
+                        int_nonce=struct.unpack(str("<L"), unhexlify(params[4]))))
+            else:
+                self.logger.debug(
+                    "Recieved work submit:\n\tworker_name: {0}\n\t"
+                    "job_id: {1}\n\textranonce2: {2}\n\t"
+                    "ntime: {3}\n\tnonce: {4} ({int_nonce})"
+                    .format(
+                        *params,
+                        int_nonce=struct.unpack(str("<L"), unhexlify(params[4]))))
+
+        if self.config['algo'] == 'hvc':
+            params[3] = hexlify(struct.pack('<I', int(params[3], 16)))
+            params[4] = hexlify(struct.pack('<I', int(params[4], 16)))
 
         if self.idle:
             self.idle = False
@@ -462,11 +482,19 @@ class StratumClient(GenericClient):
             return difficulty, self.STALE_SHARE
 
         # assemble a complete block header bytestring
-        header = job.block_header(
-            nonce=params[4],
-            extra1=self._id,
-            extra2=params[2],
-            ntime=params[3])
+        if nvote:
+            header = job.block_header(
+                nonce=params[4],
+                extra1=self._id,
+                extra2=params[2],
+                ntime=params[3],
+                nvote=nvote)
+        else:
+            header = job.block_header(
+                nonce=params[4],
+                extra1=self._id,
+                extra2=params[2],
+                ntime=params[3])
 
         # Check a submitted share against previous shares to eliminate
         # duplicates
