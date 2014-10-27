@@ -25,23 +25,24 @@ class Reporter(Component):
         raise NotImplementedError
 
     def log_share(self, client, diff, typ, params, job=None, header_hash=None,
-                  header=None):
+                  header=None, start=None, **kwargs):
         """ Logs a share to external sources for payout calculation and
         statistics """
-        #self.logger.debug("Running log share with args {} kwargs {}"
-        #                  .format((client._id, diff, typ, params), dict(job=job,
-        #                          header_hash=header_hash, header=hexlify(header))))
+        #if __debug__:
+        #    self.logger.debug(
+        #        "Running log share with args {} kwargs {}"
+        #        .format((client._id, diff, typ, params), dict(
+        #            job=job, header_hash=header_hash, header=hexlify(header))))
 
         if typ == StratumClient.VALID_SHARE:
-            start = time.time()
             self.logger.debug("Valid share accepted from worker {}.{}!"
                               .format(client.address, client.worker))
-            # Grab the raw coinbase out of the job object before gevent can preempt
-            # to another thread and change the value. Very important!
+            # Grab the raw coinbase out of the job object before gevent can
+            # preempt to another thread and change the value. Very important!
             coinbase_raw = job.coinbase.raw
 
-            # Some coins use POW function to do blockhash, while others use SHA256.
-            # Allow toggling
+            # Some coins use POW function to do blockhash, while others use
+            # SHA256. Allow toggling which is used
             if job.pow_block_hash:
                 header_hash_raw = client.algo['module'](header)[::-1]
             else:
@@ -87,7 +88,9 @@ class StatReporter(Reporter):
     them to allow separation of statistics reporting and payout related
     logging. """
 
-    defaults = dict(report_pool_stats=True, pool_worker='', chain=1)
+    defaults = dict(pool_report_configs={},
+                    chain=1,
+                    attrs={})
     gl_methods = ['_report_one_min']
 
     def __init__(self):
@@ -101,17 +104,33 @@ class StatReporter(Reporter):
                                   "don't use the StatReporter!")
 
     def log_share(self, client, diff, typ, params, job=None, header_hash=None,
-                  header=None):
+                  header=None, **kwargs):
         super(StatReporter, self).log_share(
-            client, diff, typ, params, job=job, header_hash=header_hash, header=header)
+            client, diff, typ, params, job=job, header_hash=header_hash,
+            header=header, **kwargs)
         address, worker = client.address, client.worker
         algo = client.algo['name']
         slc_time = (int(time.time()) // 60) * 60
         slc = self._minute_slices.setdefault(slc_time, {})
-        # log the share under user "pool" to allow easy/fast display of pool stats
-        if self.config['report_pool_stats']:
-            self._aggr_one_min("pool", self.config['pool_worker'], algo, typ, diff, slc)
         self._aggr_one_min(address, worker, algo, typ, diff, slc)
+        currency = job.currency if job else "UNKNOWN"
+        # log the share under user "pool" to allow easy/fast display of pool stats
+        for cfg in self.config['pool_report_configs']:
+            user = cfg['user']
+            pool_worker = cfg['worker_format_string'].format(
+                algo=algo,
+                currency=currency,
+                server_name=self.manager.config['procname'],
+                **self.config['attrs'])
+            self._aggr_one_min(user, pool_worker, algo, typ, diff, slc)
+            if cfg.get('report_merge') and job:
+                for currency in job.merged_data:
+                    pool_worker = cfg['worker_format_string'].format(
+                        algo=algo,
+                        currency=currency,
+                        server_name=self.manager.config['procname'],
+                        **self.config['attrs'])
+                    self._aggr_one_min(user, pool_worker, algo, typ, diff, slc)
 
         # reporting for vardiff rates
         if typ == StratumClient.VALID_SHARE:
@@ -128,13 +147,13 @@ class StatReporter(Reporter):
         else:
             slc[key] += amount
 
-    @loop(interval=61, precise=60)
+    def _flush_one_min(self, exit_exc=None, caller=None):
+        self._process_minute_slices(flush=True)
+        self.logger.info("One minute flush complete, Exit.")
+
+    @loop(interval=61, precise=60, fin="_flush_one_min")
     def _report_one_min(self):
-        try:
-            self._process_minute_slices()
-        except GreenletExit:
-            self.logger.info("Flushing all aggreated one minute share data...")
-            self._process_minute_slices(flush=True)
+        self._process_minute_slices()
 
     def _process_minute_slices(self, flush=False):
         """ Goes through our internal aggregated share data structures and
@@ -181,11 +200,28 @@ class QueueStatReporter(StatReporter):
     def _start_queue(self):
         self.queue = Queue()
 
-    @loop(setup='_start_queue')
+    def _flush_queue(self, exit_exc=None, caller=None):
+        sleep(1)
+        self.logger.info("Flushing a queue of size {}"
+                         .format(self.queue.qsize()))
+        self.queue.put(StopIteration)
+        for item in self.queue:
+            self._run_queue_item(item)
+        self.logger.info("Queue flush complete, Exit.")
+
+    @loop(setup='_start_queue', fin='_flush_queue')
     def _queue_proc(self):
-        name, args, kwargs = self.queue.peek()
-        self.logger.debug("Queue running {} with args '{}' kwargs '{}'"
-                          .format(name, args, kwargs))
+        item = self.queue.get()
+        if self._run_queue_item(item) == "retry":
+            # Put it at the back of the queue for retry
+            self.queue.put(item)
+            sleep(1)
+
+    def _run_queue_item(self, item):
+        name, args, kwargs = item
+        if __debug__:
+            self.logger.debug("Queue running {} with args '{}' kwargs '{}'"
+                              .format(name, args, kwargs))
         try:
             func = getattr(self, name, None)
             if func is None:
@@ -197,16 +233,13 @@ class QueueStatReporter(StatReporter):
             self.logger.error("Unable to process queue item, retrying! "
                               "{} Name: {}; Args: {}; Kwargs: {};"
                               .format(e, name, args, kwargs))
-            sleep(1)
-            return False  # Don't do regular loop sleep
+            return "retry"
         except Exception:
             # Log any unexpected problem, but don't retry because we might
             # end up endlessly retrying with same failure
             self.logger.error("Unkown error, queue data discarded!"
                               "Name: {}; Args: {}; Kwargs: {};"
                               .format(name, args, kwargs), exc_info=True)
-        # By default we want to remove the item from the queue
-        self.queue.get()
 
     def log_one_minute(self, *args, **kwargs):
         self.queue.put(("_queue_log_one_minute", args, kwargs))

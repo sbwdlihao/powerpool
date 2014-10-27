@@ -102,9 +102,18 @@ class MonitorAuxNetwork(Jobmanager, NodeMonitorMixin):
 
                 # submit it to our reporter if configured to do so
                 if self.config['send']:
+                    if start:
+                        submission_time = time.time() - start
+                        self.manager.log_event(
+                            "{name}.block_submission_{curr}:{t}|ms"
+                            .format(name=self.manager.config['procname'],
+                                    curr=self.config['currency'],
+                                    t=submission_time * 1000))
                     hsh = hexlify(pack.IntType(256, 'big').pack(aux_data['hash']))
-                    self.logger.info("{} BLOCK {}:{} accepted"
-                                     .format(self.config['currency'], hsh, new_height))
+                    self.logger.info(
+                        "{} BLOCK {}:{} accepted after {}"
+                        .format(self.config['currency'], hsh, new_height,
+                                submission_time))
 
                     # A bit of a mess that grabs the required information for
                     # reporting the new block. Pretty failsafe so at least
@@ -208,7 +217,19 @@ class MonitorAuxNetwork(Jobmanager, NodeMonitorMixin):
 
     @property
     def status(self):
-        return dict(block_stats=self.block_stats,
-                    currency=self.config['currency'],
-                    last_signal=self.last_signal,
-                    current_net=self.current_net)
+        ret = dict(block_stats=self.block_stats,
+                   currency=self.config['currency'],
+                   last_signal=self.last_signal,
+                   live_coinservers=len(self._live_connections),
+                   down_coinservers=len(self._down_connections),
+                   coinservers={},
+                   current_net=self.current_net)
+        for connection in self._live_connections:
+            st = connection.status()
+            st['status'] = 'live'
+            ret['coinservers'][connection.name] = st
+        for connection in self._down_connections:
+            st = connection.status()
+            st['status'] = 'down'
+            ret['coinservers'][connection.name] = st
+        return ret

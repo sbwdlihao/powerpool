@@ -106,9 +106,11 @@ class RedisReporter(QueueStatReporter):
         self.redis.hincrbyfloat(block_key, chain_key, shares)
         self.redis.rpush(chain_slice, user_shares)
 
-    def log_share(self, client, diff, typ, params, job=None, header_hash=None, header=None):
+    def log_share(self, client, diff, typ, params, job=None, header_hash=None, header=None,
+                  **kwargs):
         super(RedisReporter, self).log_share(
-            client, diff, typ, params, job=job, header_hash=header_hash, header=header)
+            client, diff, typ, params, job=job, header_hash=header_hash,
+            header=header, **kwargs)
 
         if typ != StratumClient.VALID_SHARE:
             return
@@ -133,7 +135,11 @@ class RedisReporter(QueueStatReporter):
                                 "{}_{}_{}".format(address, worker, did),
                                 val)
         elif typ == "status":
-            self.redis.set("status_{}_{}".format(address, worker), json.dumps(data))
+            # Set time so we know how fresh the data is
+            data['time'] = time.time()
+            # Remove the data in 1 day
+            self.redis.setex("status_{}_{}".format(address, worker),
+                             json.dumps(data), 86400)
         else:
             self.logger.warn("Recieved unsupported ppagent type {}"
                              .format(typ))

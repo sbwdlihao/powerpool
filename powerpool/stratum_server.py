@@ -5,6 +5,7 @@ import argparse
 import struct
 import random
 import time
+import weakref
 
 from binascii import hexlify, unhexlify
 from cryptokit import target_from_diff, uint256_from_str
@@ -32,7 +33,7 @@ class ThrowingArgumentParser(argparse.ArgumentParser):
 
 
 password_arg_parser = ThrowingArgumentParser()
-password_arg_parser.add_argument('-d', '--diff', type=int)
+password_arg_parser.add_argument('-d', '--diff', type=float)
 
 
 class StratumServer(Component, StreamServer):
@@ -59,6 +60,7 @@ class StratumServer(Component, StreamServer):
                                  spm_target=20,
                                  interval=30,
                                  tiers=[8, 16, 32, 64, 96, 128, 192, 256, 512]),
+                    minimum_manual_diff=64,
                     push_job_interval=30,
                     idle_worker_disconnect_threshold=3600,
                     agent=dict(enabled=False,
@@ -73,14 +75,11 @@ class StratumServer(Component, StreamServer):
     def __init__(self, config):
         self._configure(config)
         self.agent_servers = []
-        listener = (self.config['address'], self.config['port'])
 
         # Start a corresponding agent server
         if self.config['agent']['enabled']:
             serv = AgentServer(self)
             self.agent_servers.append(serv)
-
-        StreamServer.__init__(self, listener, spawn=Pool())
 
         # A dictionary of all connected clients indexed by id
         self.clients = {}
@@ -97,7 +96,16 @@ class StratumServer(Component, StreamServer):
         self.stratum_id_count = 0
         self.agent_id_count = 0
 
+        # Track the last job we pushed and when we pushed it
+        self.last_flush_job = None
+        self.last_flush_time = None
+        self.listener = None
+
     def start(self, *args, **kwargs):
+        self.listener = (self.config['address'],
+                         self.config['port'] + self.manager.config['server_number'])
+        StreamServer.__init__(self, self.listener, spawn=Pool())
+
         self.algo = self.manager.algos[self.config['algo']]
         if not self.config['reporter'] and len(self.manager.component_types['Reporter']) == 1:
             self.reporter = self.manager.component_types['Reporter'][0]
@@ -118,22 +126,22 @@ class StratumServer(Component, StreamServer):
             self.jobmanager = self._lookup(self.config['jobmanager'])
         self.jobmanager.new_job.rawlink(self.new_job)
 
-        self.logger.info("Stratum server starting up on {address}:{port}"
-                         .format(**self.config))
+        self.logger.info("Stratum server starting up on {}".format(self.listener))
         for serv in self.agent_servers:
             serv.start()
         StreamServer.start(self, *args, **kwargs)
         Component.start(self)
 
     def stop(self, *args, **kwargs):
-        self.logger.info("Stratum server {address}:{port} stopping"
-                         .format(**self.config))
+        self.logger.info("Stratum server {} stopping".format(self.listener))
         StreamServer.close(self)
-        for client in self.clients.values():
-            client.stop()
         for serv in self.agent_servers:
             serv.stop()
+        for client in self.clients.values():
+            client.stop()
+        StreamServer.stop(self)
         Component.stop(self)
+        self.logger.info("Exit")
 
     def handle(self, sock, address):
         """ A new connection appears on the server, so setup a new StratumClient
@@ -154,9 +162,7 @@ class StratumServer(Component, StreamServer):
         client.start()
 
     def new_job(self, event):
-        jm = self.jobmanager
-        job = jm.jobs[jm.latest_job]
-
+        job = event.job
         t = time.time()
         job.stratum_string()
         flush = job.flush
@@ -165,20 +171,8 @@ class StratumServer(Component, StreamServer):
                 client._push(job, flush=flush, block=False)
         self.logger.info("New job enqueued for transmission to {} users in {}"
                          .format(len(self.clients), time_format(time.time() - t)))
-
-    @property
-    def share_percs(self):
-        """ Pretty display of what percentage each reject rate is. Counts
-        from beginning of server connection """
-        acc_tot = self.counters['acc_share_n1'].total or 1
-        low_tot = self.counters['reject_low_share_n1'].total
-        dup_tot = self.counters['reject_dup_share_n1'].total
-        stale_tot = self.counters['reject_stale_share_n1'].total
-        return dict(
-            low_perc=low_tot / float(acc_tot + low_tot) * 100.0,
-            stale_perc=stale_tot / float(acc_tot + stale_tot) * 100.0,
-            dup_perc=dup_tot / float(acc_tot + dup_tot) * 100.0,
-        )
+        self.last_flush_job = job
+        self.last_flush_time = time.time()
 
     @property
     def status(self):
@@ -186,9 +180,9 @@ class StratumServer(Component, StreamServer):
         hps = (self.algo['hashes_per_share'] *
                self.counters['acc_share_n1'].minute /
                60.0)
-        dct = dict(share_percs=self.share_percs,
-                   mhps=hps / 1000000.0,
+        dct = dict(mhps=hps / 1000000.0,
                    hps=hps,
+                   last_flush_job=None,
                    agent_client_count=len(self.agent_clients),
                    client_count=len(self.clients),
                    address_count=len(self.address_lut),
@@ -196,6 +190,16 @@ class StratumServer(Component, StreamServer):
                    client_count_authed=self.authed_clients,
                    client_count_active=len(self.clients) - self.idle_clients,
                    client_count_idle=self.idle_clients)
+        if self.last_flush_job:
+            j = self.last_flush_job
+            dct['last_flush_job'] = dict(
+                algo=j.algo,
+                pow_block_hash=j.pow_block_hash,
+                currency=j.currency,
+                job_id=j.job_id,
+                merged_networks=j.merged_data.keys(),
+                pushed_at=self.last_flush_time
+            )
         return dct
 
     def set_user(self, client):
@@ -309,6 +313,7 @@ class StratumClient(GenericClient):
         self.idle = False
         self.address = None
         self.worker = None
+        self.client_type = None
         # the worker id. this is also extranonce 1
         id = self.server.stratum_id_count
         if self.manager.config['extranonce_serv_size'] == 8:
@@ -332,7 +337,7 @@ class StratumClient(GenericClient):
         # Used to determine if we should send another job on read loop timeout
         self.last_job_push = t
         # Avoids repeat pushing jobs that the client already knows about
-        self.last_job_id = None
+        self.last_job = None
         # Last time vardiff happened
         self.last_diff_adj = t - self.time_seed
         # Current difficulty setting
@@ -355,7 +360,7 @@ class StratumClient(GenericClient):
         err = {'id': id_val,
                'result': None,
                'error': (num, self.errors[num], None)}
-        self.logger.warn("Error number {} on ip {}".format(num, self.peer_name[0]))
+        self.logger.debug("Error number {}".format(num, self.peer_name[0]))
         self.write_queue.put(json.dumps(err, separators=(',', ':')) + "\n")
 
     def send_success(self, id_val=1):
@@ -379,16 +384,13 @@ class StratumClient(GenericClient):
         when a new block is found since work on the old block is
         invalid."""
         job = None
-        while True:
-            jobid = self.jobmanager.latest_job
-            try:
-                job = self.jobmanager.jobs[jobid]
-                break
-            except KeyError:
+        while job is None:
+            job = self.jobmanager.latest_job
+            if job is None:
                 self.logger.warn("No jobs available for worker!")
                 sleep(0.1)
 
-        if self.last_job_id == job.job_id and not timeout:
+        if self.last_job == job and not timeout:
             self.logger.info("Ignoring non timeout resend of job id {} to worker {}.{}"
                              .format(job.job_id, self.address, self.worker))
             return
@@ -396,8 +398,9 @@ class StratumClient(GenericClient):
         # we push the next difficulty here instead of in the vardiff block to
         # prevent a potential mismatch between client and server
         if self.next_diff != self.difficulty:
-            self.logger.info("Pushing diff updae {} -> {} before job for {}.{}"
-                             .format(self.difficulty, self.next_diff, self.address, self.worker))
+            self.logger.info(
+                "Pushing diff update {} -> {} before job for {}.{}"
+                .format(self.difficulty, self.next_diff, self.address, self.worker))
             self.difficulty = self.next_diff
             self.push_difficulty()
 
@@ -411,15 +414,15 @@ class StratumClient(GenericClient):
         """ Abbreviated push update that will occur when pushing new block
         notifications. Mico-optimized to try and cut stale share rates as much
         as possible. """
-        self.last_job_id = job.job_id
+        self.last_job = job
         self.last_job_push = time.time()
         # get client local job id to map current difficulty
         self.job_counter += 1
         job_id = str(self.job_counter)
-        self.job_mapper[job_id] = (self.difficulty, job.job_id)
+        self.job_mapper[job_id] = (self.difficulty, weakref.ref(job))
         self.write_queue.put(job.stratum_string() % (job_id, "true" if flush else "false"), block=block)
 
-    def submit_job(self, data):
+    def submit_job(self, data, t):
         """ Handles recieving work submission and checking that it is valid
         , if it meets network diff, etc. Sends reply to stratum client. """
         params = data['params']
@@ -461,27 +464,21 @@ class StratumClient(GenericClient):
         self.last_share_submit = time.time()
 
         try:
-            difficulty, jobid = self.job_mapper[data['params'][1]]
+            difficulty, job = self.job_mapper[data['params'][1]]
+            job = job()  # weakref will be none if it's been GCed
         except KeyError:
+            job = None  # Job not in jobmapper at all, we got a bogus submit
             # since we can't identify the diff we just have to assume it's
             # current diff
+            difficulty = self.difficulty
+
+        if job is None:
             self.send_error(self.STALE_SHARE_ERR, id_val=data['id'])
             self.reporter.log_share(client=self,
                                     diff=self.difficulty,
                                     typ=self.STALE_SHARE,
-                                    params=params)
-            return self.difficulty, self.STALE_SHARE
-
-        # lookup the job in the global job dictionary. If it's gone from here
-        # then a new block was announced which wiped it
-        try:
-            job = self.jobmanager.jobs[jobid]
-        except KeyError:
-            self.send_error(self.STALE_SHARE_ERR, id_val=data['id'])
-            self.reporter.log_share(client=self,
-                                    diff=difficulty,
-                                    typ=self.STALE_SHARE,
-                                    params=params)
+                                    params=params,
+                                    start=t)
             return difficulty, self.STALE_SHARE
 
         # assemble a complete block header bytestring
@@ -510,7 +507,8 @@ class StratumClient(GenericClient):
                                     diff=difficulty,
                                     typ=self.DUP_SHARE,
                                     params=params,
-                                    job=job)
+                                    job=job,
+                                    start=t)
             return difficulty, self.DUP_SHARE
 
         job_target = target_from_diff(difficulty, job.diff1)
@@ -523,7 +521,8 @@ class StratumClient(GenericClient):
                                     diff=difficulty,
                                     typ=self.LOW_DIFF_SHARE,
                                     params=params,
-                                    job=job)
+                                    job=job,
+                                    start=t)
             return difficulty, self.LOW_DIFF_SHARE
 
         # we want to send an ack ASAP, so do it here
@@ -537,7 +536,8 @@ class StratumClient(GenericClient):
                                 params=params,
                                 job=job,
                                 header_hash=hash_int,
-                                header=header)
+                                header=header,
+                                start=t)
 
         return difficulty, self.VALID_SHARE
 
@@ -634,6 +634,10 @@ class StratumClient(GenericClient):
                 self.send_error(id_val=data['id'])
                 return
 
+            try:
+                self.client_type = data['params'][0]
+            except IndexError:
+                pass
             ret = {
                 'result': (
                     (
@@ -674,11 +678,15 @@ class StratumClient(GenericClient):
                     pass
                 else:
                     if args.diff:
-                        self.difficulty = args.diff
-                        self.next_diff = args.diff
+                        diff = max(self.config['minimum_manual_diff'], args.diff)
+                        self.difficulty = diff
+                        self.next_diff = diff
             except IndexError:
                 password = ""
                 username = ""
+
+            self.manager.log_event(
+                "{name}.auth:1|c".format(name=self.manager.config['procname']))
 
             self.logger.info("Authentication request from {} for username {}"
                              .format(self.peer_name[0], username))
@@ -689,7 +697,8 @@ class StratumClient(GenericClient):
             self.authenticated = True
             self.server.set_user(self)
 
-            # notify of success authing and send him current diff and latest job
+            # notify of success authing and send him current diff and latest
+            # job
             self.send_success(data['id'])
             self.push_difficulty()
             self.push_job()
@@ -700,18 +709,26 @@ class StratumClient(GenericClient):
                 self.send_error(24, id_val=data['id'])
                 return
 
-            diff, typ = self.submit_job(data)
+            t = time.time()
+            diff, typ = self.submit_job(data, t)
             # Log the share to our stat counters
             key = ""
             if typ > 0:
                 key += "reject_"
             key += StratumClient.share_type_strings[typ] + "_share"
-            self._incr(key + "_n1", diff)
-            self._incr(key + "_count")
+            if typ == 0:
+                # Increment valid shares to calculate hashrate
+                self._incr(key + "_n1", diff)
+            self.manager.log_event(
+                "{name}.{type}:1|c\n"
+                "{name}.{type}_n1:{diff}|c\n"
+                "{name}.submit_time:{t}|ms"
+                .format(name=self.manager.config['procname'], type=key,
+                        diff=diff, t=(time.time() - t) * 1000))
 
             # don't recalc their diff more often than interval
             if (self.config['vardiff']['enabled'] is True and
-                    (time.time() - self.last_diff_adj) > self.config['vardiff']['interval']):
+                    (t - self.last_diff_adj) > self.config['vardiff']['interval']):
                 self.recalc_vardiff()
 
         elif meth == "mining.get_transactions":
@@ -739,6 +756,7 @@ class StratumClient(GenericClient):
         """ Displayed on the single client view in the http status monitor """
         return dict(alltime_accepted_shares=self.accepted_shares,
                     difficulty=self.difficulty,
+                    type=self.client_type,
                     worker=self.worker,
                     id=self._id,
                     last_share_submit=str(self.last_share_submit_delta),
