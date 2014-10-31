@@ -26,14 +26,18 @@ for key, val in pairs(keys) do
     for w in string.gmatch(val, "%w+") do
         t[i] = w
         i = i + 1
-     end
-     if t[0] == "chain" and t[2] == "shares" then
-         local base = "chain_" .. t[1] .. "_slice"
-         local idx = redis.call('incr', base .. "_index")
-         redis.pcall('HSET', ARGV[1], "chain_" .. t[1] .. "_start_index", "" .. idx)
-         redis.pcall('renamenx', base, base .. "_" .. idx)
-         table.insert(idx_map, t[1] .. ":" .. idx)
-     end
+    end
+    if t[0] == "chain" and t[2] == "start" and t[3] == "index" then
+        local idx = redis.pcall('HGET', ARGV[3], val)
+        table.insert(idx_map, "start_index" .. ":" .. t[1] .. ":" .. idx)
+    end
+    if t[0] == "chain" and t[2] == "shares" then
+        local base = "chain_" .. t[1] .. "_slice"
+        local idx = redis.call('incr', base .. "_index")
+        redis.pcall('HSET', ARGV[1], "chain_" .. t[1] .. "_start_index", "" .. idx)
+        redis.pcall('renamenx', base, base .. "_" .. idx)
+        table.insert(idx_map, "solve_index" .. ":" .. t[1] .. ":" .. idx)
+    end
 end
 return idx_map
 """
@@ -83,8 +87,8 @@ class RedisReporter(QueueStatReporter):
         chain_indexes_serial = self.solve_cmd(keys=[], args=[block_key, time.time(), new_block_key])
         chain_indexs = {}
         for chain in chain_indexes_serial:
-            chain_id, last_index = chain.split(":")
-            chain_indexs["chain_{}_solve_index".format(chain_id)] = last_index
+            flag, chain_id, last_index = chain.split(":")
+            chain_indexs["chain_{}_{}".format(chain_id, flag)] = last_index
         self.redis.hmset(new_block_key, dict(address=address,
                                              worker=worker,
                                              height=height,
@@ -107,24 +111,21 @@ class RedisReporter(QueueStatReporter):
 
     def log_share(self, client, diff, typ, params, job=None, header_hash=None, header=None,
                   **kwargs):
-        super(RedisReporter, self).log_share(
-            client, diff, typ, params, job=job, header_hash=header_hash,
-            header=header, **kwargs)
-
-        if typ != StratumClient.VALID_SHARE:
-            return
-
-        for currency in job.merged_data:
+        if typ == StratumClient.VALID_SHARE:
+            for currency in job.merged_data:
+                self.queue.put(("_queue_log_share", [], dict(address=client.address,
+                                                             shares=diff,
+                                                             algo=job.algo,
+                                                             currency=currency,
+                                                             merged=True)))
             self.queue.put(("_queue_log_share", [], dict(address=client.address,
                                                          shares=diff,
                                                          algo=job.algo,
-                                                         currency=currency,
-                                                         merged=True)))
-        self.queue.put(("_queue_log_share", [], dict(address=client.address,
-                                                     shares=diff,
-                                                     algo=job.algo,
-                                                     currency=job.currency,
-                                                     merged=False)))
+                                                         currency=job.currency,
+                                                         merged=False)))
+        super(RedisReporter, self).log_share(
+            client, diff, typ, params, job=job, header_hash=header_hash,
+            header=header, **kwargs)
 
     def _queue_agent_send(self, address, worker, typ, data, stamp):
         if typ == "hashrate" or typ == "temp":
