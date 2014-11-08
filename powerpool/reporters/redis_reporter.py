@@ -75,6 +75,10 @@ class RedisReporter(QueueStatReporter):
             "min_{}_{}_{}".format(StratumClient.share_type_strings[typ], algo, stamp),
             address, amount)
 
+    def _queue_log_analysis_one_minute(self, currency, algo, address, worker, stamp, total, theory, real):
+        key = "analysis_min_{}_{}_{}_{}_{}".format(currency, algo, address, worker, stamp)
+        self.redis.hmset(key, dict(theory=theory, total=total, real=real))
+
     def _queue_add_block(self, address, height, total_subsidy, fees, hex_bits,
                          hex_hash, currency, algo, merged=False, worker=None,
                          **kwargs):
@@ -101,10 +105,11 @@ class RedisReporter(QueueStatReporter):
     def _queue_log_share(self, address, shares, algo, currency, merged=False):
         block_key = 'current_block_{}_{}'.format(currency, algo)
         chain_key = 'chain_{}_shares'.format(self.config['chain'])
-        chain_slice = 'chain_{}_slice'.format(self.config['chain'])
-        user_shares = '{}:{}'.format(address, shares)
         self.redis.hincrbyfloat(block_key, chain_key, shares)
-        self.redis.rpush(chain_slice, user_shares)
+        if not merged:
+            chain_slice = 'chain_{}_slice'.format(self.config['chain'])
+            user_shares = '{}:{}'.format(address, shares)
+            self.redis.rpush(chain_slice, user_shares)
 
     def log_share(self, client, diff, typ, params, job=None, header_hash=None, header=None,
                   **kwargs):

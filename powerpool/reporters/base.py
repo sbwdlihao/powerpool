@@ -6,6 +6,7 @@ from gevent import spawn, GreenletExit
 from gevent.queue import Queue
 from hashlib import sha256
 from binascii import hexlify
+from cryptokit import target_from_diff
 
 from ..lib import Component, loop
 from ..utils import time_format
@@ -96,10 +97,17 @@ class StatReporter(Reporter):
     def __init__(self):
         self._minute_slices = {}
         self._per_address_slices = {}
+        self._analysis_minute_slices = {}
 
     def log_one_minute(self, address, worker, algo, stamp, typ, amount):
         """ Called to log a minutes worth of shares that have been submitted
         by a unique (address, worker, algo). """
+        raise NotImplementedError("If you're not logging the one minute chunks"
+                                  "don't use the StatReporter!")
+
+    def log_analysis_one_minute(self, currency, algo, address, worker, total, theory, real):
+        """ Called to log a minutes worth of shares to analysis that have been submitted
+        by a unique (currency, algo, address, worker). """
         raise NotImplementedError("If you're not logging the one minute chunks"
                                   "don't use the StatReporter!")
 
@@ -124,10 +132,10 @@ class StatReporter(Reporter):
                 **self.config['attrs'])
             self._aggr_one_min(user, pool_worker, algo, typ, diff, slc)
             if cfg.get('report_merge') and job:
-                for currency in job.merged_data:
+                for merge_currency in job.merged_data:
                     pool_worker = cfg['worker_format_string'].format(
                         algo=algo,
-                        currency=currency,
+                        currency=merge_currency,
                         server_name=self.manager.config['procname'],
                         **self.config['attrs'])
                     self._aggr_one_min(user, pool_worker, algo, typ, diff, slc)
@@ -139,6 +147,20 @@ class StatReporter(Reporter):
                 slc[address] = diff
             else:
                 slc[address] += diff
+
+            # reporting for block withholding attack
+            slc = self._analysis_minute_slices.setdefault(slc_time, {})
+            key = (currency, algo, address, worker)
+            job_target = target_from_diff(diff, job.diff1)
+            theory = float(job.bits_target)/float(job_target)
+            real = 1 if header_hash <= job.bits_target else 0
+            if key not in slc:
+                slc[key] = {'total':1, 'theory':theory, 'real':real}  
+            else:
+                slc[key]['total'] += 1
+                slc[key]['theory'] += theory
+                slc[key]['real'] += real
+
 
     def _aggr_one_min(self, address, worker, algo, typ, amount, slc):
         key = (address, worker, algo, typ)
@@ -171,6 +193,12 @@ class StatReporter(Reporter):
                     # XXX: GreenletExit getting raised here might cause some
                     # double reporting!
                 del self._minute_slices[stamp]
+
+        for stamp, data in self._analysis_minute_slices.items():
+            if flush or stamp < upper:
+                for (currency, algo, address, worker), value in data.iteritems():
+                    self.log_analysis_one_minute(currency, algo, address, worker, stamp, value['total'], value['theory'], value['real'])
+                del self._analysis_minute_slices[stamp]
 
         self.logger.info("One minute shares reported in {}"
                          .format(time_format(time.time() - t)))
@@ -243,6 +271,9 @@ class QueueStatReporter(StatReporter):
 
     def log_one_minute(self, *args, **kwargs):
         self.queue.put(("_queue_log_one_minute", args, kwargs))
+
+    def log_analysis_one_minute(self, *args, **kwargs):
+        self.queue.put(("_queue_log_analysis_one_minute", args, kwargs))
 
     def add_block(self, *args, **kwargs):
         self.queue.put(("_queue_add_block", args, kwargs))
