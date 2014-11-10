@@ -426,12 +426,6 @@ class StratumClient(GenericClient):
             self.job_mapper = tmp
             self.job_mapper.clear()
         job_id = str(self.job_counter)
-        if self.job_counter % 10 == 0:
-            # Run a swap to avoid GC
-            tmp = self.job_mapper
-            self.old_job_mapper = self.job_mapper
-            self.job_mapper = tmp
-            self.job_mapper.clear()
         self.job_mapper[job_id] = (self.difficulty, weakref.ref(job))
         self.write_queue.put(job.stratum_string() % (job_id, "true" if flush else "false"), block=block)
 
