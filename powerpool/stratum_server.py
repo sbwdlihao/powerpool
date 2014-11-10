@@ -405,9 +405,9 @@ class StratumClient(GenericClient):
             self.difficulty = self.next_diff
             self.push_difficulty()
 
-        self.logger.info("Sending job id {} to worker {}.{}{}"
-                         .format(job.job_id, self.address, self.worker,
-                                 " after timeout" if timeout else ''))
+        self.logger.debug("Sending job id {} to worker {}.{}{}"
+                          .format(job.job_id, self.address, self.worker,
+                                  " after timeout" if timeout else ''))
 
         self._push(job)
 
@@ -419,6 +419,12 @@ class StratumClient(GenericClient):
         self.last_job_push = time.time()
         # get client local job id to map current difficulty
         self.job_counter += 1
+        if self.job_counter % 10 == 0:
+            # Run a swap to avoid GC
+            tmp = self.job_mapper
+            self.old_job_mapper = self.job_mapper
+            self.job_mapper = tmp
+            self.job_mapper.clear()
         job_id = str(self.job_counter)
         if self.job_counter % 10 == 0:
             # Run a swap to avoid GC
