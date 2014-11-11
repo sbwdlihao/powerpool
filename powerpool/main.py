@@ -76,7 +76,7 @@ class PowerPool(Component, DatagramServer):
                         sha256={"module": "cryptokit.sha256d",
                                 "hashes_per_share": 65536},
                         hvc={"module": "cryptokit.hvc_powhash",
-                                "hashes_per_share": 65536}
+                                "hashes_per_share": 4294967296}
                     ))
 
     @classmethod
