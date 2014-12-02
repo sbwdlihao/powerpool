@@ -56,6 +56,7 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
 
         # Currently active jobs keyed by their unique ID
         self.jobs = {}
+        self.stale_jobs = deque([], maxlen=10)
         self.latest_job = None  # The last job that was generated
         self.new_job = Event()
         self.last_signal = 0.0
@@ -397,7 +398,12 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
         bt_obj.pow_block_hash = self.config['pow_block_hash']
         bt_obj.block_height = self._last_gbt['height']
         bt_obj.acc_shares = set()
-        bt_obj.flush = flush
+        if flush:
+            bt_obj.type = 0
+        elif push:
+            bt_obj.type = 1
+        else:
+            bt_obj.type = 2
         bt_obj.found_block = self.found_block
 
         # Push the fresh job to users after updating details
@@ -406,31 +412,34 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
             self.jobs.clear()
         self.jobs[job_id] = bt_obj
         self.latest_job = bt_obj
-        if push or flush:
-            self.new_job.job = bt_obj
-            self.new_job.set()
-            self.new_job.clear()
 
-            self.logger.info("{}: New block template with {:,} trans. "
-                             "Diff {:,.4f}. Subsidy {:,.2f}. Height {:,}. "
-                             "Merged: {}"
-                             .format("FLUSH" if flush else "PUSH",
-                                     len(self._last_gbt['transactions']),
-                                     bits_to_difficulty(self._last_gbt['bits']),
-                                     self._last_gbt['coinbasevalue'] / 100000000.0,
-                                     self._last_gbt['height'],
-                                     ', '.join(auxdata.keys())))
+        self.new_job.job = bt_obj
+        self.new_job.set()
+        self.new_job.clear()
+        event = ("{name}.jobmanager.new_job:1|c\n"
+                 .format(name=self.manager.config['procname']))
+        if push or flush:
+            self.logger.info(
+                "{}: New block template with {:,} trans. "
+                "Diff {:,.4f}. Subsidy {:,.2f}. Height {:,}. Merged: {}"
+                .format("FLUSH" if flush else "PUSH",
+                        len(self._last_gbt['transactions']),
+                        bits_to_difficulty(self._last_gbt['bits']),
+                        self._last_gbt['coinbasevalue'] / 100000000.0,
+                        self._last_gbt['height'],
+                        ', '.join(auxdata.keys())))
+            event += ("{name}.jobmanager.work_push:1|c\n"
+                      .format(name=self.manager.config['procname']))
 
         # Stats and notifications now that it's pushed
         if flush:
-            self._incr('work_restarts')
-            self._incr('work_pushes')
+            event += ("{name}.jobmanager.work_restart:1|c\n"
+                      .format(name=self.manager.config['procname']))
             self.logger.info("New {} network block announced! Wiping previous"
                              " jobs and pushing".format(network))
         elif push:
             self.logger.info("New {} network block announced, pushing new job!"
                              .format(network))
-            self._incr('work_pushes')
 
         if new_block:
             hex_bits = hexlify(bt_obj.bits)
@@ -441,7 +450,7 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
             self.current_net['prev_hash'] = bt_obj.hashprev_be_hex
             self.current_net['transactions'] = len(bt_obj.transactions)
 
-            self.manager.log_event(
+            event += (
                 "{name}.{curr}.difficulty:{diff}|g\n"
                 "{name}.{curr}.subsidy:{subsidy}|g\n"
                 "{name}.{curr}.job_generate:{t}|g\n"
@@ -452,4 +461,4 @@ class MonitorNetwork(Jobmanager, NodeMonitorMixin):
                         subsidy=bt_obj.total_value,
                         height=bt_obj.block_height - 1,
                         t=(time.time() - self._last_gbt['update_time']) * 1000))
-        self._incr('new_jobs')
+        self.manager.log_event(event)

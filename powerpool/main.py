@@ -65,6 +65,8 @@ class PowerPool(Component, DatagramServer):
                     datagram=dict(enabled=False, port=6855, host="127.0.0.1"),
                     server_number=0,
                     algorithms=dict(
+                        hvc={"module": "cryptokit.hvc_powhash",
+                                "hashes_per_share": 4294967296},
                         x11={"module": "drk_hash.getPoWHash",
                              "hashes_per_share": 4294967296},
                         scrypt={"module": "ltc_scrypt.getPoWHash",
@@ -74,8 +76,6 @@ class PowerPool(Component, DatagramServer):
                         blake256={"module": "blake_hash.getPoWHash",
                                   "hashes_per_share": 65536},
                         sha256={"module": "cryptokit.sha256d",
-                                "hashes_per_share": 65536},
-                        hvc={"module": "cryptokit.hvc_powhash",
                                 "hashes_per_share": 4294967296}
                     ))
 
